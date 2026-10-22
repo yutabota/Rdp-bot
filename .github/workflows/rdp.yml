@@ -25,11 +25,19 @@ jobs:
         if: inputs.os_version == 'windows'
         shell: powershell
         run: |
+          # 1. تعطيل سياسة تعقيد كلمات المرور (هذا هو الحل)
+          secedit /export /cfg C:\secpol.cfg
+          (Get-Content C:\secpol.cfg).replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content C:\secpol.cfg
+          secedit /configure /db C:\windows\security\local.sdb /cfg C:\secpol.cfg /areas SECURITYPOLICY
+          
+          # 2. تفعيل RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           netsh advfirewall set allprofiles state off
+          
+          # 3. إنشاء المستخدم بكلمة المرور
           $user = "yuta"
-          $pass = "Yuta@321"
+          $pass = "Yuta@321" 
           if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
             New-LocalUser -Name $user -Password (ConvertTo-SecureString $pass -AsPlainText -Force) -PasswordNeverExpires
           } else {

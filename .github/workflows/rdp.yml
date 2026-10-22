@@ -1,0 +1,87 @@
+name: RDP Server
+on:
+  workflow_dispatch:
+    inputs:
+      os_version:
+        description: "Choose OS"
+        required: true
+        default: "windows"
+        type: choice
+        options:
+          - "windows"
+          - "linux"
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ${{ inputs.os_version == 'windows' && 'windows-latest' || 'ubuntu-latest' }}
+    timeout-minutes: 360
+
+    steps:
+      - name: Configure Environment (Windows)
+        if: inputs.os_version == 'windows'
+        shell: powershell
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          netsh advfirewall set allprofiles state off
+          $user = "yuta"
+          $pass = "Yuta@321"
+          if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name $user -Password (ConvertTo-SecureString $pass -AsPlainText -Force) -PasswordNeverExpires
+          } else {
+            Set-LocalUser -Name $user -Password (ConvertTo-SecureString $pass -AsPlainText -Force)
+          }
+          Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
+
+      - name: Configure Environment (Linux)
+        if: inputs.os_version == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xfce4 xfce4-goodies tightvncserver curl
+          sudo useradd -m -s /bin/bash yuta || true
+          echo "yuta:Yuta@321" | sudo chpasswd
+          sudo adduser yuta sudo || true
+          echo "yuta ALL=(ALL) NOPASSWD:ALL" | sudo tee -a /etc/sudoers
+          sudo -u yuta bash -c "mkdir -p ~/.vnc && echo 'Yuta@321' | vncpasswd -f > ~/.vnc/passwd && chmod 600 ~/.vnc/passwd"
+          sudo -u yuta bash -c "vncserver :1 -geometry 1280x720 -depth 24"
+          curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+          echo "deb https://ngrok-agent.s3.amazonaws.com bookworm main" | sudo tee /etc/apt/sources.list.d/ngrok.list
+          sudo apt-get update
+          sudo apt-get install -y ngrok
+
+      - name: Setup ngrok
+        shell: bash
+        run: |
+          if [ "${{ inputs.os_version }}" = "windows" ]; then
+            curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -o ngrok.zip
+            unzip ngrok.zip
+            ./ngrok.exe config add-authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
+          else
+            ngrok config add-authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
+          fi
+
+      - name: Start Tunnel and Post to Issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          if [ "${{ inputs.os_version }}" = "windows" ]; then
+            ./ngrok.exe tcp 127.0.0.1:3389 --log=stdout > ngrok.log &
+          else
+            ngrok tcp 127.0.0.1:5901 --log=stdout > ngrok.log &
+          fi
+          sleep 15
+          URL=$(grep -oP 'tcp://[^ ]+' ngrok.log | head -n 1 | sed 's|tcp://||')
+          HOST=$(echo $URL | cut -d':' -f1)
+          PORT=$(echo $URL | cut -d':' -f2)
+          BODY="===START_DATA===\nHOST=$HOST\nPORT=$PORT\nUSER=yuta\nPASS=Yuta@321\nTYPE=${{ inputs.os_version }}\n===END_DATA==="
+          ISSUE_TITLE="Server-$GITHUB_RUN_ID"
+          ISSUE_RESPONSE=$(curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -d "{\"title\": \"$ISSUE_TITLE\", \"body\": \"Logs\"}" "https://api.github.com/repos/${{ github.repository }}/issues")
+          ISSUE_NUMBER=$(echo $ISSUE_RESPONSE | jq -r '.number')
+          curl -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -d "{\"body\": \"$BODY\"}" "https://api.github.com/repos/${{ github.repository }}/issues/$ISSUE_NUMBER/comments"
+          sleep 21600

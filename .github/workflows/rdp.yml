@@ -1,121 +1,40 @@
-name: RDP Server
-on:
-  workflow_dispatch:
-    inputs:
-      os_version:
-        description: "Choose OS / Stack"
-        required: true
-        default: "windows"
-        type: choice
-        options:
-          - "windows"
-          - "linux"
-          - "dev_stack"
-          - "hacker_stack"
+- name: Setup ngrok and Get URL
+  shell: bash
+  run: |
+    # 1. تنزيل ngrok وفك الضغط بأوامر bash
+    curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -o ngrok.zip
+    unzip -o ngrok.zip -d ngrok
 
-permissions:
-  issues: write
-  contents: read
+    # 2. تحديد الملف التنفيذي
+    if [ "${{ inputs.os_version }}" != "linux" ]; then
+      NGROK_BIN="./ngrok/ngrok.exe"
+    else
+      NGROK_BIN="./ngrok"
+    fi
 
-jobs:
-  deploy:
-    runs-on: ${{ inputs.os_version == 'linux' && 'ubuntu-latest' || 'windows-latest' }}
-    timeout-minutes: 360
+    # 3. تجربة المفاتيح حتى ينجح أحدها
+    tokens=("${{ secrets.NGROK_TOKEN_1 }}" "${{ secrets.NGROK_TOKEN_2 }}" "${{ secrets.NGROK_TOKEN_3 }}" "${{ secrets.NGROK_TOKEN_4 }}" "${{ secrets.NGROK_TOKEN_5 }}" "${{ secrets.NGROK_TOKEN_6 }}" "${{ secrets.NGROK_TOKEN_7 }}")
+    
+    for t in "${tokens[@]}"; do
+      if [ -z "$t" ]; then continue; fi
+      echo "Trying token: ${t:0:5}..."
+      $NGROK_BIN config add-authtoken $t
+      $NGROK_BIN tcp 127.0.0.1:3389 --log=stdout > ngrok.log &
+      NGROK_PID=$!
+      sleep 6
+      URL=$(grep -oP 'tcp://[^ ]+' ngrok.log | head -n 1 | sed 's|tcp://||')
+      if [ -n "$URL" ]; then
+        echo "SUCCESS! URL: $URL"
+        echo "TUNNEL_URL=$URL" >> $GITHUB_ENV
+        break
+      else
+        echo "Token is full. Trying next token..."
+        kill $NGROK_PID
+      fi
+    done
 
-    steps:
-      - name: Configure Environment (Windows)
-        if: inputs.os_version != 'linux'
-        shell: powershell
-        run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          netsh advfirewall set allprofiles state off
-          secedit /export /cfg C:\secpol.cfg
-          (Get-Content C:\secpol.cfg).replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content C:\secpol.cfg
-          secedit /configure /db C:\windows\security\local.sdb /cfg C:\secpol.cfg /areas SECURITYPOLICY
-          $user = "yuta"
-          $pass = "Yuta@321"
-          if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name $user -Password (ConvertTo-SecureString $pass -AsPlainText -Force) -PasswordNeverExpires
-          } else {
-            Set-LocalUser -Name $user -Password (ConvertTo-SecureString $pass -AsPlainText -Force)
-          }
-          Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
-
-      - name: Install Dev Stack (Windows)
-        if: inputs.os_version == 'dev_stack'
-        shell: powershell
-        run: |
-          choco install vscode python nodejs git -y
-          refreshenv
-
-      - name: Install Hacker Stack (Windows)
-        if: inputs.os_version == 'hacker_stack'
-        shell: powershell
-        run: |
-          choco install nmap wireshark python git -y
-          refreshenv
-
-      - name: Configure Environment (Linux)
-        if: inputs.os_version == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y xfce4 xfce4-goodies tightvncserver curl
-          sudo useradd -m -s /bin/bash yuta || true
-          echo "yuta:Yuta@321" | sudo chpasswd
-          sudo adduser yuta sudo || true
-          echo "yuta ALL=(ALL) NOPASSWD:ALL" | sudo tee -a /etc/sudoers
-          sudo -u yuta bash -c "mkdir -p ~/.vnc && echo 'Yuta@321' | vncpasswd -f > ~/.vnc/passwd && chmod 600 ~/.vnc/passwd"
-          sudo -u yuta bash -c "vncserver :1 -geometry 1280x720 -depth 24"
-          curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
-          echo "deb https://ngrok-agent.s3.amazonaws.com bookworm main" | sudo tee /etc/apt/sources.list.d/ngrok.list
-          sudo apt-get update
-          sudo apt-get install -y ngrok
-
-      - name: Setup ngrok and Get URL
-        shell: bash
-        run: |
-          if [ "${{ inputs.os_version }}" != "linux" ]; then
-            curl.exe -L -o ngrok.zip "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip"
-            Expand-Archive -Path "ngrok.zip" -DestinationPath ".\ngrok" -Force
-            tokens=("${{ secrets.NGROK_TOKEN_1 }}" "${{ secrets.NGROK_TOKEN_2 }}" "${{ secrets.NGROK_TOKEN_3 }}" "${{ secrets.NGROK_TOKEN_4 }}" "${{ secrets.NGROK_TOKEN_5 }}" "${{ secrets.NGROK_TOKEN_6 }}" "${{ secrets.NGROK_TOKEN_7 }}")
-            for t in "${tokens[@]}"; do
-              if [ -z "$t" ]; then continue; fi
-              .\ngrok\ngrok.exe config add-authtoken $t
-              .\ngrok\ngrok.exe tcp 127.0.0.1:3389 --log=stdout > ngrok.log &
-              NGROK_PID=$!
-              sleep 6
-              URL=$(grep -oP 'tcp://[^ ]+' ngrok.log | head -n 1 | sed 's|tcp://||')
-              if [ -n "$URL" ]; then echo "TUNNEL_URL=$URL" >> $GITHUB_ENV; break; else kill $NGROK_PID; fi
-            done
-          else
-            tokens=("${{ secrets.NGROK_TOKEN_1 }}" "${{ secrets.NGROK_TOKEN_2 }}" "${{ secrets.NGROK_TOKEN_3 }}" "${{ secrets.NGROK_TOKEN_4 }}" "${{ secrets.NGROK_TOKEN_5 }}" "${{ secrets.NGROK_TOKEN_6 }}" "${{ secrets.NGROK_TOKEN_7 }}")
-            for t in "${tokens[@]}"; do
-              if [ -z "$t" ]; then continue; fi
-              ngrok config add-authtoken $t
-              ngrok tcp 127.0.0.1:5901 --log=stdout > ngrok.log &
-              NGROK_PID=$!
-              sleep 6
-              URL=$(grep -oP 'tcp://[^ ]+' ngrok.log | head -n 1 | sed 's|tcp://||')
-              if [ -n "$URL" ]; then echo "TUNNEL_URL=$URL" >> $GITHUB_ENV; break; else kill $NGROK_PID; fi
-            done
-          fi
-
-      - name: Post to Issue
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          if [ "${{ inputs.os_version }}" != "linux" ]; then TYPE="windows"; else TYPE="linux"; fi
-          HOST=$(echo ${{ env.TUNNEL_URL }} | cut -d':' -f1)
-          PORT=$(echo ${{ env.TUNNEL_URL }} | cut -d':' -f2)
-          BODY="===START_DATA===\nHOST=$HOST\nPORT=$PORT\nUSER=yuta\nPASS=Yuta@321\nTYPE=$TYPE\n===END_DATA==="
-          ISSUE_TITLE="Server-$GITHUB_RUN_ID"
-          ISSUE_RESPONSE=$(curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -d "{\"title\": \"$ISSUE_TITLE\", \"body\": \"Logs\"}" "https://api.github.com/repos/${{ github.repository }}/issues")
-          ISSUE_NUMBER=$(echo $ISSUE_RESPONSE | jq -r '.number')
-          curl -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -d "{\"body\": \"$BODY\"}" "https://api.github.com/repos/${{ github.repository }}/issues/$ISSUE_NUMBER/comments"
-
-      - name: Keep Alive
-        shell: bash
-        run: sleep 21600
+    # 4. التحقق من النجاح
+    if [ -z "$TUNNEL_URL" ]; then
+      echo "All tokens are full!"
+      exit 1
+    fi

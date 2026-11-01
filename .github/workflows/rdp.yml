@@ -73,7 +73,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ngrok
 
-      - name: Setup ngrok (Windows) with Loop
+      - name: Setup ngrok (Windows) with Token Loop
         if: inputs.os_version != 'linux'
         shell: powershell
         run: |
@@ -81,62 +81,81 @@ jobs:
           curl.exe -L -o ngrok.zip "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip"
           Expand-Archive -Path "ngrok.zip" -DestinationPath ".\ngrok" -Force
           
-          $tokens = @("${{ secrets.NGROK_TOKEN_1 }}", "${{ secrets.NGROK_TOKEN_2 }}", "${{ secrets.NGROK_TOKEN_3 }}", "${{ secrets.NGROK_TOKEN_4 }}", "${{ secrets.NGROK_TOKEN_5 }}", "${{ secrets.NGROK_TOKEN_6 }}", "${{ secrets.NGROK_TOKEN_7 }}")
-          $success = $false
+          $tokens = @(
+            "${{ secrets.NGROK_TOKEN_1 }}", "${{ secrets.NGROK_TOKEN_2 }}", 
+            "${{ secrets.NGROK_TOKEN_3 }}", "${{ secrets.NGROK_TOKEN_4 }}", 
+            "${{ secrets.NGROK_TOKEN_5 }}", "${{ secrets.NGROK_TOKEN_6 }}", 
+            "${{ secrets.NGROK_TOKEN_7 }}"
+          )
+          $url = ""
           
           foreach ($t in $tokens) {
-              if ($t -eq "" -or $t -eq $null) { continue }
-              Write-Host "Trying token: $($t.Substring(0,5))..."
+              if ([string]::IsNullOrWhiteSpace($t)) { continue }
+              Write-Host "Attempting to connect with token: $($t.Substring(0,5))..."
               .\ngrok\ngrok.exe config add-authtoken $t
+              
               $job = Start-Job -ScriptBlock { Set-Location $using:PWD; .\ngrok\ngrok.exe tcp 127.0.0.1:3389 }
-              Start-Sleep -Seconds 5
+              Start-Sleep -Seconds 6
               
               try {
                   $response = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -ErrorAction Stop
                   if ($response.tunnels.Count -gt 0) {
-                      $success = $true
-                      $script:url = $response.tunnels[0].public_url -replace 'tcp://', ''
+                      $url = $response.tunnels[0].public_url -replace 'tcp://', ''
+                      Write-Host "SUCCESS! URL: $url"
                       break
                   }
               } catch {
+                  Write-Host "Token is full. Trying next token..."
                   Stop-Job $job; Remove-Job $job
               }
           }
           
-          if (-not $success) { Write-Error "All tokens are full!"; exit 1 }
+          if ([string]::IsNullOrWhiteSpace($url)) { Write-Error "All tokens are full!"; exit 1 }
+          echo "TUNNEL_URL=$url" >> $env:GITHUB_ENV
+          
+          # Keep the successful job alive
+          Wait-Job -Job $job -Timeout 21600
 
-      - name: Setup ngrok (Linux) with Loop
+      - name: Setup ngrok (Linux) with Token Loop
         if: inputs.os_version == 'linux'
         shell: bash
         run: |
-          tokens=("${{ secrets.NGROK_TOKEN_1 }}" "${{ secrets.NGROK_TOKEN_2 }}" "${{ secrets.NGROK_TOKEN_3 }}" "${{ secrets.NGROK_TOKEN_4 }}" "${{ secrets.NGROK_TOKEN_5 }}" "${{ secrets.NGROK_TOKEN_6 }}" "${{ secrets.NGROK_TOKEN_7 }}")
-          success=0
+          tokens=(
+            "${{ secrets.NGROK_TOKEN_1 }}" "${{ secrets.NGROK_TOKEN_2 }}" 
+            "${{ secrets.NGROK_TOKEN_3 }}" "${{ secrets.NGROK_TOKEN_4 }}" 
+            "${{ secrets.NGROK_TOKEN_5 }}" "${{ secrets.NGROK_TOKEN_6 }}" 
+            "${{ secrets.NGROK_TOKEN_7 }}"
+          )
+          url=""
           for t in "${tokens[@]}"; do
               if [ -z "$t" ]; then continue; fi
-              echo "Trying token: ${t:0:5}..."
+              echo "Attempting to connect with token: ${t:0:5}..."
               ngrok config add-authtoken $t
               ngrok tcp 127.0.0.1:5901 --log=stdout > ngrok.log &
               NGROK_PID=$!
-              sleep 5
+              sleep 6
               URL=$(grep -oP 'tcp://[^ ]+' ngrok.log | head -n 1 | sed 's|tcp://||')
               if [ -n "$URL" ]; then
-                  success=1
-                  echo "URL=$URL" >> $GITHUB_ENV
+                  url=$URL
+                  echo "SUCCESS! URL: $url"
                   break
               else
+                  echo "Token is full. Trying next token..."
                   kill $NGROK_PID
               fi
           done
-          if [ $success -eq 0 ]; then echo "All tokens are full!"; exit 1; fi
+          if [ -z "$url" ]; then echo "All tokens are full!"; exit 1; fi
+          echo "TUNNEL_URL=$url" >> $GITHUB_ENV
+          sleep 21600
 
       - name: Post to Issue (Windows)
-        if: inputs.os_version != 'linux' && success()
+        if: inputs.os_version != 'linux'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: powershell
         run: |
-          $host_part = $script:url.Split(':')[0]
-          $port_part = $script:url.Split(':')[1]
+          $host_part = $env:TUNNEL_URL.Split(':')[0]
+          $port_part = $env:TUNNEL_URL.Split(':')[1]
           $body_text = "===START_DATA===`nHOST=$host_part`nPORT=$port_part`nUSER=yuta`nPASS=Yuta@321`nTYPE=windows`n===END_DATA==="
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = "application/vnd.github+json" }
           $issue_title = "Server-$env:GITHUB_RUN_ID"
@@ -145,7 +164,6 @@ jobs:
           $issue_number = $issue_response.number
           $comment_body = @{ body = $body_text } | ConvertTo-Json
           Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/issues/$issue_number/comments" -Method Post -Headers $headers -Body $comment_body -ContentType "application/json"
-          Start-Sleep -Seconds 21600
 
       - name: Post to Issue (Linux)
         if: inputs.os_version == 'linux'
@@ -153,11 +171,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          HOST=$(echo ${{ env.URL }} | cut -d':' -f1)
-          PORT=$(echo ${{ env.URL }} | cut -d':' -f2)
+          HOST=$(echo ${{ env.TUNNEL_URL }} | cut -d':' -f1)
+          PORT=$(echo ${{ env.TUNNEL_URL }} | cut -d':' -f2)
           BODY="===START_DATA===\nHOST=$HOST\nPORT=$PORT\nUSER=yuta\nPASS=Yuta@321\nTYPE=linux\n===END_DATA==="
           ISSUE_TITLE="Server-$GITHUB_RUN_ID"
           ISSUE_RESPONSE=$(curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -d "{\"title\": \"$ISSUE_TITLE\", \"body\": \"Logs\"}" "https://api.github.com/repos/${{ github.repository }}/issues")
           ISSUE_NUMBER=$(echo $ISSUE_RESPONSE | jq -r '.number')
           curl -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -d "{\"body\": \"$BODY\"}" "https://api.github.com/repos/${{ github.repository }}/issues/$ISSUE_NUMBER/comments"
-          sleep 21600

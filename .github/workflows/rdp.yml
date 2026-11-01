@@ -69,7 +69,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ngrok
 
-      - name: Setup ngrok and Get URL
+      # تم دمج الإعداد والنشر والإبقاء حياً في خطوة واحدة
+      - name: Setup ngrok, Post to Issue, and Keep Alive
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           if [ "${{ inputs.os_version }}" != "linux" ]; then
@@ -77,9 +80,11 @@ jobs:
             unzip -o ngrok.zip -d ngrok
             NGROK_BIN="./ngrok/ngrok.exe"
             PORT=3389
+            TYPE="windows"
           else
             NGROK_BIN="ngrok"
             PORT=5901
+            TYPE="linux"
           fi
 
           tokens=("${{ secrets.NGROK_TOKEN_1 }}" "${{ secrets.NGROK_TOKEN_2 }}" "${{ secrets.NGROK_TOKEN_3 }}" "${{ secrets.NGROK_TOKEN_4 }}" "${{ secrets.NGROK_TOKEN_5 }}" "${{ secrets.NGROK_TOKEN_6 }}" "${{ secrets.NGROK_TOKEN_7 }}")
@@ -89,7 +94,9 @@ jobs:
             if [ -z "$t" ]; then continue; fi
             echo "Trying token: ${t:0:5}..."
             $NGROK_BIN config add-authtoken $t
-            nohup $NGROK_BIN tcp $PORT --log=stdout > ngrok.log 2>&1 &
+            
+            # تشغيل ngrok في الخلفية
+            $NGROK_BIN tcp $PORT --log=stdout > ngrok.log 2>&1 &
             NGROK_PID=$!
             sleep 6
             
@@ -99,7 +106,6 @@ jobs:
             if [ -n "$TUNNEL" ] && [ "$TUNNEL" != "null" ]; then
               TUNNEL=$(echo $TUNNEL | sed 's|tcp://||')
               echo "SUCCESS! URL: $TUNNEL"
-              echo "TUNNEL_URL=$TUNNEL" >> $GITHUB_ENV
               break
             else
               echo "Token is full. Trying next token..."
@@ -113,15 +119,9 @@ jobs:
             exit 1
           fi
 
-      - name: Post to Issue
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          if [ "${{ inputs.os_version }}" != "linux" ]; then TYPE="windows"; else TYPE="linux"; fi
-          HOST=$(echo ${{ env.TUNNEL_URL }} | cut -d':' -f1)
-          PORT=$(echo ${{ env.TUNNEL_URL }} | cut -d':' -f2)
-          
+          # إرسال البيانات إلى الـ Issue
+          HOST=$(echo $TUNNEL | cut -d':' -f1)
+          PORT=$(echo $TUNNEL | cut -d':' -f2)
           BODY="===START_DATA===\nHOST=$HOST\nPORT=$PORT\nUSER=yuta\nPASS=Yuta@321\nTYPE=$TYPE\n===END_DATA==="
           BODY_JSON=$(jq -n --arg body "$BODY" '{body: $body}')
           ISSUE_TITLE="Server-$GITHUB_RUN_ID"
@@ -135,16 +135,9 @@ jobs:
             exit 1
           fi
           
-          COMMENT_RESPONSE=$(curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -d "$BODY_JSON" "https://api.github.com/repos/${{ github.repository }}/issues/$ISSUE_NUMBER/comments")
-          COMMENT_ID=$(echo $COMMENT_RESPONSE | jq -r '.id')
+          curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -d "$BODY_JSON" "https://api.github.com/repos/${{ github.repository }}/issues/$ISSUE_NUMBER/comments"
           
-          if [ "$COMMENT_ID" == "null" ] || [ -z "$COMMENT_ID" ]; then
-            echo "Failed to post comment: $COMMENT_RESPONSE"
-            exit 1
-          fi
+          echo "Data posted successfully. Keeping ngrok alive for 6 hours..."
           
-          echo "Data posted successfully to Issue #$ISSUE_NUMBER"
-
-      - name: Keep Alive
-        shell: bash
-        run: sleep 21600
+          # هذا السطر سيجعل الـ Workflow ينتظر 6 ساعات، وبهذا تبقى عملية ngrok حية طوال هذه المدة
+          sleep 21600

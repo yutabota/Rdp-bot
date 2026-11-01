@@ -3,13 +3,20 @@ on:
   workflow_dispatch:
     inputs:
       os_version:
-        description: "Choose OS"
+        description: "Choose OS / Stack"
         required: true
         default: "windows"
         type: choice
         options:
           - "windows"
           - "linux"
+          - "dev_stack"
+          - "hacker_stack"
+      token_id:
+        description: "Token ID (1-7)"
+        required: true
+        default: "1"
+        type: string
 
 permissions:
   issues: write
@@ -17,27 +24,22 @@ permissions:
 
 jobs:
   deploy:
-    runs-on: ${{ inputs.os_version == 'windows' && 'windows-latest' || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.os_version == 'linux' && 'ubuntu-latest' || 'windows-latest' }}
     timeout-minutes: 360
 
     steps:
       - name: Configure Environment (Windows)
-        if: inputs.os_version == 'windows'
+        if: inputs.os_version != 'linux'
         shell: powershell
         run: |
-          # 1. تعطيل سياسة تعقيد كلمات المرور (هذا هو الحل)
-          secedit /export /cfg C:\secpol.cfg
-          (Get-Content C:\secpol.cfg).replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content C:\secpol.cfg
-          secedit /configure /db C:\windows\security\local.sdb /cfg C:\secpol.cfg /areas SECURITYPOLICY
-          
-          # 2. تفعيل RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           netsh advfirewall set allprofiles state off
-          
-          # 3. إنشاء المستخدم بكلمة المرور
+          secedit /export /cfg C:\secpol.cfg
+          (Get-Content C:\secpol.cfg).replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content C:\secpol.cfg
+          secedit /configure /db C:\windows\security\local.sdb /cfg C:\secpol.cfg /areas SECURITYPOLICY
           $user = "yuta"
-          $pass = "Yuta@321" 
+          $pass = "Yuta@321"
           if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
             New-LocalUser -Name $user -Password (ConvertTo-SecureString $pass -AsPlainText -Force) -PasswordNeverExpires
           } else {
@@ -45,6 +47,20 @@ jobs:
           }
           Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
+
+      - name: Install Dev Stack (Windows)
+        if: inputs.os_version == 'dev_stack'
+        shell: powershell
+        run: |
+          choco install vscode python nodejs git -y
+          refreshenv
+
+      - name: Install Hacker Stack (Windows)
+        if: inputs.os_version == 'hacker_stack'
+        shell: powershell
+        run: |
+          choco install nmap wireshark python git -y
+          refreshenv
 
       - name: Configure Environment (Linux)
         if: inputs.os_version == 'linux'
@@ -62,32 +78,37 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ngrok
 
-      - name: Setup ngrok
-        shell: bash
+      - name: Setup ngrok (Windows)
+        if: inputs.os_version != 'linux'
+        shell: powershell
         run: |
-          if [ "${{ inputs.os_version }}" = "windows" ]; then
-            curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -o ngrok.zip
-            unzip ngrok.zip
-            ./ngrok.exe config add-authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
-          else
-            ngrok config add-authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
-          fi
+          $ProgressPreference = 'SilentlyContinue'
+          curl.exe -L -o ngrok.zip "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip"
+          Expand-Archive -Path "ngrok.zip" -DestinationPath ".\ngrok" -Force
+          .\ngrok\ngrok.exe config add-authtoken ${{ secrets[format('NGROK_TOKEN_{0}', inputs.token_id)] }}
+
+      - name: Setup ngrok (Linux)
+        if: inputs.os_version == 'linux'
+        run: |
+          ngrok config add-authtoken ${{ secrets[format('NGROK_TOKEN_{0}', inputs.token_id)] }}
 
       - name: Start Tunnel and Post to Issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          if [ "${{ inputs.os_version }}" = "windows" ]; then
+          if [ "${{ inputs.os_version }}" != "linux" ]; then
             ./ngrok.exe tcp 127.0.0.1:3389 --log=stdout > ngrok.log &
+            TYPE="windows"
           else
             ngrok tcp 127.0.0.1:5901 --log=stdout > ngrok.log &
+            TYPE="linux"
           fi
           sleep 15
           URL=$(grep -oP 'tcp://[^ ]+' ngrok.log | head -n 1 | sed 's|tcp://||')
           HOST=$(echo $URL | cut -d':' -f1)
           PORT=$(echo $URL | cut -d':' -f2)
-          BODY="===START_DATA===\nHOST=$HOST\nPORT=$PORT\nUSER=yuta\nPASS=Yuta@321\nTYPE=${{ inputs.os_version }}\n===END_DATA==="
+          BODY="===START_DATA===\nHOST=$HOST\nPORT=$PORT\nUSER=yuta\nPASS=Yuta@321\nTYPE=$TYPE\n===END_DATA==="
           ISSUE_TITLE="Server-$GITHUB_RUN_ID"
           ISSUE_RESPONSE=$(curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -d "{\"title\": \"$ISSUE_TITLE\", \"body\": \"Logs\"}" "https://api.github.com/repos/${{ github.repository }}/issues")
           ISSUE_NUMBER=$(echo $ISSUE_RESPONSE | jq -r '.number')

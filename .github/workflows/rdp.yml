@@ -46,16 +46,12 @@ jobs:
       - name: Install Dev Stack (Windows)
         if: inputs.os_version == 'dev_stack'
         shell: powershell
-        run: |
-          choco install vscode python nodejs git -y
-          refreshenv
+        run: choco install vscode python nodejs git -y
 
       - name: Install Hacker Stack (Windows)
         if: inputs.os_version == 'hacker_stack'
         shell: powershell
-        run: |
-          choco install nmap wireshark python git -y
-          refreshenv
+        run: choco install nmap wireshark python git -y
 
       - name: Configure Environment (Linux)
         if: inputs.os_version == 'linux'
@@ -76,7 +72,6 @@ jobs:
       - name: Setup ngrok and Get URL
         shell: bash
         run: |
-          # 1. تحميل ngrok (ويندوز فقط، لأن لينكس مثبت مسبقاً)
           if [ "${{ inputs.os_version }}" != "linux" ]; then
             curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -o ngrok.zip
             unzip -o ngrok.zip -d ngrok
@@ -87,28 +82,24 @@ jobs:
             PORT=5901
           fi
 
-          # 2. تجربة المفاتيح (Token Loop)
           tokens=("${{ secrets.NGROK_TOKEN_1 }}" "${{ secrets.NGROK_TOKEN_2 }}" "${{ secrets.NGROK_TOKEN_3 }}" "${{ secrets.NGROK_TOKEN_4 }}" "${{ secrets.NGROK_TOKEN_5 }}" "${{ secrets.NGROK_TOKEN_6 }}" "${{ secrets.NGROK_TOKEN_7 }}")
           
-          URL=""
+          TUNNEL=""
           for t in "${tokens[@]}"; do
             if [ -z "$t" ]; then continue; fi
             echo "Trying token: ${t:0:5}..."
             $NGROK_BIN config add-authtoken $t
-            
-            # تشغيل ngrok في الخلفية
             nohup $NGROK_BIN tcp $PORT --log=stdout > ngrok.log 2>&1 &
             NGROK_PID=$!
             sleep 6
             
-            # استخراج الرابط بدقة باستخدام API و jq
             TUNNEL_INFO=$(curl -s http://127.0.0.1:4040/api/tunnels)
-            URL=$(echo $TUNNEL_INFO | jq -r '.tunnels[0].public_url // empty')
+            TUNNEL=$(echo $TUNNEL_INFO | jq -r '.tunnels[0].public_url // empty')
             
-            if [ -n "$URL" ] && [ "$URL" != "null" ]; then
-              URL=$(echo $URL | sed 's|tcp://||') # إزالة tcp://
-              echo "SUCCESS! URL: $URL"
-              echo "TUNNEL_URL=$URL" >> $GITHUB_ENV
+            if [ -n "$TUNNEL" ] && [ "$TUNNEL" != "null" ]; then
+              TUNNEL=$(echo $TUNNEL | sed 's|tcp://||')
+              echo "SUCCESS! URL: $TUNNEL"
+              echo "TUNNEL_URL=$TUNNEL" >> $GITHUB_ENV
               break
             else
               echo "Token is full. Trying next token..."
@@ -117,7 +108,8 @@ jobs:
             fi
           done
 
-          if [ -z "$TUNNEL_URL" ]; then
+          # التحقق من المتغير المحلي TUNNEL وليس TUNNEL_URL
+          if [ -z "$TUNNEL" ]; then
             echo "All tokens are full!"
             exit 1
           fi
@@ -131,16 +123,13 @@ jobs:
           HOST=$(echo ${{ env.TUNNEL_URL }} | cut -d':' -f1)
           PORT=$(echo ${{ env.TUNNEL_URL }} | cut -d':' -f2)
           
-          # إنشاء JSON بطريقة آمنة باستخدام jq
           BODY="===START_DATA===\nHOST=$HOST\nPORT=$PORT\nUSER=yuta\nPASS=Yuta@321\nTYPE=$TYPE\n===END_DATA==="
           BODY_JSON=$(jq -n --arg body "$BODY" '{body: $body}')
-          
           ISSUE_TITLE="Server-$GITHUB_RUN_ID"
           ISSUE_JSON=$(jq -n --arg title "$ISSUE_TITLE" '{title: $title, body: "Logs"}')
           
           ISSUE_RESPONSE=$(curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -d "$ISSUE_JSON" "https://api.github.com/repos/${{ github.repository }}/issues")
           ISSUE_NUMBER=$(echo $ISSUE_RESPONSE | jq -r '.number')
-          
           curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -d "$BODY_JSON" "https://api.github.com/repos/${{ github.repository }}/issues/$ISSUE_NUMBER/comments"
 
       - name: Keep Alive

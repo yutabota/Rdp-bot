@@ -108,7 +108,6 @@ jobs:
             fi
           done
 
-          # التحقق من المتغير المحلي TUNNEL وليس TUNNEL_URL
           if [ -z "$TUNNEL" ]; then
             echo "All tokens are full!"
             exit 1
@@ -130,7 +129,21 @@ jobs:
           
           ISSUE_RESPONSE=$(curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -d "$ISSUE_JSON" "https://api.github.com/repos/${{ github.repository }}/issues")
           ISSUE_NUMBER=$(echo $ISSUE_RESPONSE | jq -r '.number')
-          curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -d "$BODY_JSON" "https://api.github.com/repos/${{ github.repository }}/issues/$ISSUE_NUMBER/comments"
+          
+          if [ "$ISSUE_NUMBER" == "null" ] || [ -z "$ISSUE_NUMBER" ]; then
+            echo "Failed to create issue: $ISSUE_RESPONSE"
+            exit 1
+          fi
+          
+          COMMENT_RESPONSE=$(curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -d "$BODY_JSON" "https://api.github.com/repos/${{ github.repository }}/issues/$ISSUE_NUMBER/comments")
+          COMMENT_ID=$(echo $COMMENT_RESPONSE | jq -r '.id')
+          
+          if [ "$COMMENT_ID" == "null" ] || [ -z "$COMMENT_ID" ]; then
+            echo "Failed to post comment: $COMMENT_RESPONSE"
+            exit 1
+          fi
+          
+          echo "Data posted successfully to Issue #$ISSUE_NUMBER"
 
       - name: Keep Alive
         shell: bash

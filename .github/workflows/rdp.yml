@@ -27,10 +27,9 @@ jobs:
           # 1. تفعيل RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           
-          # 2. تعطيل NLA وإجبار بروتوكول RDP القديم (لحل مشكلة xfreerdp)
+          # 2. تعطيل NLA فقط، وإبقاء التشفير TLS (عشان يتوافق مع تطبيق Windows App و ngrok)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "MinEncryptionLevel" -Value 1 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 2 -Force
           
           # 3. حذف الشهادة التالفة
           Remove-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\RCM\Certificate" -Force -ErrorAction SilentlyContinue
@@ -38,13 +37,13 @@ jobs:
           # 4. تعطيل جدار الحماية
           netsh advfirewall set allprofiles state off
           
-          # 5. كسر حماية كلمة المرور (تعطيل سياسة التعقيد)
+          # 5. كسر حماية كلمة المرور
           secedit /export /cfg C:\secpol.cfg
           (Get-Content C:\secpol.cfg) -replace "PasswordComplexity = 1", "PasswordComplexity = 0" | Set-Content C:\secpol.cfg
           secedit /configure /db C:\windows\security\local.sdb /cfg C:\secpol.cfg /areas SECURITYPOLICY
           Remove-Item -Force C:\secpol.cfg
           
-          # 6. إنشاء المستخدم بكلمة المرور القديمة
+          # 6. إنشاء المستخدم
           $user = "yuta"
           $pass = "Yuta@321"
           if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) { 
@@ -54,6 +53,21 @@ jobs:
           }
           Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
+          
+          Start-Service TermService -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 10
+
+      - name: Test RDP Port (Windows)
+        if: inputs.os_version != 'linux'
+        shell: powershell
+        run: |
+          $maxAttempts = 5
+          for ($i=1; $i -le $maxAttempts; $i++) {
+              $test = Test-NetConnection -ComputerName "127.0.0.1" -Port 3389 -WarningAction SilentlyContinue
+              if ($test.TcpTestSucceeded) { exit 0 }
+              Start-Sleep -Seconds 5
+          }
+          exit 1
 
       - name: Configure Environment (Linux)
         if: inputs.os_version == 'linux'
@@ -91,7 +105,7 @@ jobs:
             $NGROK_BIN config add-authtoken $t
             $NGROK_BIN tcp $PORT --log=stdout > ngrok.log 2>&1 &
             NGROK_PID=$!
-            sleep 6
+            sleep 8
             TUNNEL_INFO=$(curl -s http://127.0.0.1:4040/api/tunnels)
             TUNNEL=$(echo $TUNNEL_INFO | jq -r '.tunnels[0].public_url // empty')
             if [ -n "$TUNNEL" ] && [ "$TUNNEL" != "null" ]; then

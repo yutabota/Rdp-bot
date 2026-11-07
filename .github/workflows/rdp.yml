@@ -27,21 +27,31 @@ jobs:
           # 1. تفعيل RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           
-          # 2. تعطيل NLA وإجبار بروتوكول RDP القديم (لحل مشكلة 0x1104 مع xfreerdp)
+          # 2. تعطيل NLA وإجبار بروتوكول RDP القديم (لحل مشكلة xfreerdp)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "MinEncryptionLevel" -Value 1 -Force
           
-          # 3. حذف الشهادة التالفة لضمان الاتصال
+          # 3. حذف الشهادة التالفة
           Remove-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\RCM\Certificate" -Force -ErrorAction SilentlyContinue
           
-          # 4. تعطيل جدار الحماية تماماً (لأن ngrok يعمل كنفق)
+          # 4. تعطيل جدار الحماية
           netsh advfirewall set allprofiles state off
           
-          # 5. إنشاء المستخدم
+          # 5. كسر حماية كلمة المرور (تعطيل سياسة التعقيد)
+          secedit /export /cfg C:\secpol.cfg
+          (Get-Content C:\secpol.cfg) -replace "PasswordComplexity = 1", "PasswordComplexity = 0" | Set-Content C:\secpol.cfg
+          secedit /configure /db C:\windows\security\local.sdb /cfg C:\secpol.cfg /areas SECURITYPOLICY
+          Remove-Item -Force C:\secpol.cfg
+          
+          # 6. إنشاء المستخدم بكلمة المرور القديمة
           $user = "yuta"
           $pass = "Yuta@321"
-          if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) { New-LocalUser -Name $user -Password (ConvertTo-SecureString $pass -AsPlainText -Force) -PasswordNeverExpires } else { Set-LocalUser -Name $user -Password (ConvertTo-SecureString $pass -AsPlainText -Force) }
+          if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) { 
+              New-LocalUser -Name $user -Password (ConvertTo-SecureString $pass -AsPlainText -Force) -PasswordNeverExpires 
+          } else { 
+              Set-LocalUser -Name $user -Password (ConvertTo-SecureString $pass -AsPlainText -Force) 
+          }
           Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
 

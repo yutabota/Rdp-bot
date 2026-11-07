@@ -54,28 +54,29 @@ jobs:
           Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "ngrok.zip"
           Expand-Archive -Path "ngrok.zip" -DestinationPath "." -Force
           
-          $tokens = @("${{ secrets.NGROK_TOKEN_1 }}", "${{ secrets.NGROK_TOKEN_2 }}", "${{ secrets.NGROK_TOKEN_3 }}", "${{ secrets.NGROK_TOKEN_4 }}", "${{ secrets.NGROK_TOKEN_5 }}", "${{ secrets.NGROK_TOKEN_6 }}", "${{ secrets.NGROK_TOKEN_7 }}")
+          $tokens = @("${{ secrets.NGROK_TOKEN_1 }}", "${{ secrets.NGROK_TOKEN_2 }}", "${{ secrets.NGROK_TOKEN_3 }}", "${{ secrets.NGROK_TOKEN_4 }}", "${{ secrets.NGROK_TOKEN_5 }}")
           $tunnel = ""
           foreach ($t in $tokens) {
             if ([string]::IsNullOrWhiteSpace($t)) { continue }
             .\ngrok.exe config add-authtoken $t
-            Start-Process -FilePath ".\ngrok.exe" -ArgumentList "tcp 3389 --log=stdout" -NoNewWindow -RedirectStandardOutput "ngrok.log"
-            Start-Sleep -Seconds 10
+            # استخدام منطقة أوروبا (eu) لتجاوز حظر الشبكات
+            $proc = Start-Process -FilePath ".\ngrok.exe" -ArgumentList "tcp 3389 --region eu --log=stdout" -NoNewWindow -PassThru
+            Start-Sleep -Seconds 12
             try {
               $info = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels"
               if ($info.tunnels) {
                 $tunnel = $info.tunnels[0].public_url -replace "tcp://", ""
+                echo "TUNNEL_URL=$tunnel" >> $env:GITHUB_ENV
                 break
               }
             } catch { }
             Stop-Process -Name "ngrok" -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 2
           }
           if ([string]::IsNullOrWhiteSpace($tunnel)) { exit 1 }
-          echo "TUNNEL_URL=$tunnel" >> $env:GITHUB_ENV
 
-      - name: Configure Environment (Linux)
+      - name: Configure & Setup ngrok (Linux)
         if: inputs.os_version == 'linux'
+        shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y xfce4 xfce4-goodies tightvncserver curl unzip jq
@@ -85,23 +86,19 @@ jobs:
           echo "yuta ALL=(ALL) NOPASSWD:ALL" | sudo tee -a /etc/sudoers
           sudo -u yuta bash -c "mkdir -p ~/.vnc && echo 'Yuta@321' | vncpasswd -f > ~/.vnc/passwd && chmod 600 ~/.vnc/passwd"
           sudo -u yuta bash -c "vncserver :1 -geometry 1280x720 -depth 24"
-          curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
-          echo "deb https://ngrok-agent.s3.amazonaws.com bookworm main" | sudo tee /etc/apt/sources.list.d/ngrok.list
-          sudo apt-get update
-          sudo apt-get install -y ngrok
-
-      - name: Setup ngrok (Linux)
-        if: inputs.os_version == 'linux'
-        shell: bash
-        run: |
-          tokens=("${{ secrets.NGROK_TOKEN_1 }}" "${{ secrets.NGROK_TOKEN_2 }}" "${{ secrets.NGROK_TOKEN_3 }}" "${{ secrets.NGROK_TOKEN_4 }}" "${{ secrets.NGROK_TOKEN_5 }}" "${{ secrets.NGROK_TOKEN_6 }}" "${{ secrets.NGROK_TOKEN_7 }}")
+          
+          curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.zip -o ngrok.zip
+          unzip -o ngrok.zip -d .
+          
+          tokens=("${{ secrets.NGROK_TOKEN_1 }}" "${{ secrets.NGROK_TOKEN_2 }}" "${{ secrets.NGROK_TOKEN_3 }}")
           TUNNEL=""
           for t in "${tokens[@]}"; do
             if [ -z "$t" ]; then continue; fi
-            ngrok config add-authtoken $t
-            ngrok tcp 5901 --log=stdout > ngrok.log 2>&1 &
+            ./ngrok config add-authtoken $t
+            # استخدام منطقة أوروبا (eu) هنا أيضاً
+            ./ngrok tcp 5901 --region eu --log=stdout > ngrok.log 2>&1 &
             NGROK_PID=$!
-            sleep 10
+            sleep 12
             TUNNEL_INFO=$(curl -s http://127.0.0.1:4040/api/tunnels)
             TUNNEL=$(echo $TUNNEL_INFO | jq -r '.tunnels[0].public_url // empty')
             if [ -n "$TUNNEL" ] && [ "$TUNNEL" != "null" ]; then

@@ -12,46 +12,38 @@ on:
           - "linux"
           - "dev_stack"
           - "hacker_stack"
-
 permissions:
   issues: write
   contents: read
-
 jobs:
   deploy:
     runs-on: ${{ inputs.os_version == 'linux' && 'ubuntu-latest' || 'windows-latest' }}
     timeout-minutes: 360
-
     steps:
       - name: Configure Environment (Windows)
         if: inputs.os_version != 'linux'
         shell: powershell
         run: |
+          # 1. تفعيل RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          
+          # 2. تعطيل NLA وإجبار بروتوكول RDP القديم (لحل مشكلة 0x1104 مع xfreerdp)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "MinEncryptionLevel" -Value 1 -Force
+          
+          # 3. حذف الشهادة التالفة لضمان الاتصال
+          Remove-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\RCM\Certificate" -Force -ErrorAction SilentlyContinue
+          
+          # 4. تعطيل جدار الحماية تماماً (لأن ngrok يعمل كنفق)
           netsh advfirewall set allprofiles state off
-          secedit /export /cfg C:\secpol.cfg
-          (Get-Content C:\secpol.cfg).replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content C:\secpol.cfg
-          secedit /configure /db C:\windows\security\local.sdb /cfg C:\secpol.cfg /areas SECURITYPOLICY
+          
+          # 5. إنشاء المستخدم
           $user = "yuta"
           $pass = "Yuta@321"
-          if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name $user -Password (ConvertTo-SecureString $pass -AsPlainText -Force) -PasswordNeverExpires
-          } else {
-            Set-LocalUser -Name $user -Password (ConvertTo-SecureString $pass -AsPlainText -Force)
-          }
+          if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) { New-LocalUser -Name $user -Password (ConvertTo-SecureString $pass -AsPlainText -Force) -PasswordNeverExpires } else { Set-LocalUser -Name $user -Password (ConvertTo-SecureString $pass -AsPlainText -Force) }
           Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
-
-      - name: Install Dev Stack (Windows)
-        if: inputs.os_version == 'dev_stack'
-        shell: powershell
-        run: choco install vscode python nodejs git -y
-
-      - name: Install Hacker Stack (Windows)
-        if: inputs.os_version == 'hacker_stack'
-        shell: powershell
-        run: choco install nmap wireshark python git -y
 
       - name: Configure Environment (Linux)
         if: inputs.os_version == 'linux'
@@ -69,9 +61,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ngrok
 
-      - name: Setup ngrok, Post to Issue, and Keep Alive
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Setup ngrok and Get URL
         shell: bash
         run: |
           if [ "${{ inputs.os_version }}" != "linux" ]; then
@@ -79,63 +69,48 @@ jobs:
             unzip -o ngrok.zip -d ngrok
             NGROK_BIN="./ngrok/ngrok.exe"
             PORT=3389
-            TYPE="windows"
           else
             NGROK_BIN="ngrok"
             PORT=5901
-            TYPE="linux"
           fi
-
-          tokens=("${{ secrets.NGROK_TOKEN_1 }}" "${{ secrets.NGROK_TOKEN_2 }}" "${{ secrets.NGROK_TOKEN_3 }}" "${{ secrets.NGROK_TOKEN_4 }}" "${{ secrets.NGROK_TOKEN_5 }}" "${{ secrets.NGROK_TOKEN_6 }}" "${{ secrets.NGROK_TOKEN_7 }}")
           
+          tokens=("${{ secrets.NGROK_TOKEN_1 }}" "${{ secrets.NGROK_TOKEN_2 }}" "${{ secrets.NGROK_TOKEN_3 }}" "${{ secrets.NGROK_TOKEN_4 }}" "${{ secrets.NGROK_TOKEN_5 }}" "${{ secrets.NGROK_TOKEN_6 }}" "${{ secrets.NGROK_TOKEN_7 }}")
           TUNNEL=""
           for t in "${tokens[@]}"; do
             if [ -z "$t" ]; then continue; fi
-            echo "Trying token: ${t:0:5}..."
             $NGROK_BIN config add-authtoken $t
             $NGROK_BIN tcp $PORT --log=stdout > ngrok.log 2>&1 &
             NGROK_PID=$!
             sleep 6
-            
             TUNNEL_INFO=$(curl -s http://127.0.0.1:4040/api/tunnels)
             TUNNEL=$(echo $TUNNEL_INFO | jq -r '.tunnels[0].public_url // empty')
-            
             if [ -n "$TUNNEL" ] && [ "$TUNNEL" != "null" ]; then
               TUNNEL=$(echo $TUNNEL | sed 's|tcp://||')
-              echo "SUCCESS! URL: $TUNNEL"
+              echo "TUNNEL_URL=$TUNNEL" >> $GITHUB_ENV
               break
             else
-              echo "Token is full. Trying next token..."
               kill $NGROK_PID
               sleep 1
             fi
           done
+          if [ -z "$TUNNEL" ]; then exit 1; fi
 
-          if [ -z "$TUNNEL" ]; then
-            echo "All tokens are full!"
-            exit 1
-          fi
-
-          HOST=$(echo $TUNNEL | cut -d':' -f1)
-          PORT=$(echo $TUNNEL | cut -d':' -f2)
-          
-          # السطر السحري الذي يحل المشكلة (استخدام printf بدلاً من "")
-          BODY=$(printf "===START_DATA===\nHOST=%s\nPORT=%s\nUSER=yuta\nPASS=Yuta@321\nTYPE=%s\n===END_DATA===" "$HOST" "$PORT" "$TYPE")
-          
+      - name: Post to Issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          if [ "${{ inputs.os_version }}" != "linux" ]; then TYPE="windows"; else TYPE="linux"; fi
+          HOST=$(echo ${{ env.TUNNEL_URL }} | cut -d':' -f1)
+          PORT=$(echo ${{ env.TUNNEL_URL }} | cut -d':' -f2)
+          BODY=$(printf "===START_DATA===\\nHOST=%s\\nPORT=%s\\nUSER=yuta\\nPASS=Yuta@321\\nTYPE=%s\\n===END_DATA===" "$HOST" "$PORT" "$TYPE")
           BODY_JSON=$(jq -n --arg body "$BODY" '{body: $body}')
           ISSUE_TITLE="Server-$GITHUB_RUN_ID"
           ISSUE_JSON=$(jq -n --arg title "$ISSUE_TITLE" '{title: $title, body: "Logs"}')
-          
           ISSUE_RESPONSE=$(curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -d "$ISSUE_JSON" "https://api.github.com/repos/${{ github.repository }}/issues")
           ISSUE_NUMBER=$(echo $ISSUE_RESPONSE | jq -r '.number')
-          
-          if [ "$ISSUE_NUMBER" == "null" ] || [ -z "$ISSUE_NUMBER" ]; then
-            echo "Failed to create issue: $ISSUE_RESPONSE"
-            exit 1
-          fi
-          
           curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -d "$BODY_JSON" "https://api.github.com/repos/${{ github.repository }}/issues/$ISSUE_NUMBER/comments"
-          
-          echo "Data posted successfully. Keeping ngrok alive for 6 hours..."
-          
-          sleep 21600
+
+      - name: Keep Alive
+        shell: bash
+        run: sleep 21600

@@ -24,26 +24,17 @@ jobs:
         if: inputs.os_version != 'linux'
         shell: powershell
         run: |
-          # 1. تفعيل RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          
-          # 2. تعطيل NLA فقط، وإبقاء التشفير TLS (عشان يتوافق مع تطبيق Windows App و ngrok)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 2 -Force
-          
-          # 3. حذف الشهادة التالفة
           Remove-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\RCM\Certificate" -Force -ErrorAction SilentlyContinue
-          
-          # 4. تعطيل جدار الحماية
           netsh advfirewall set allprofiles state off
           
-          # 5. كسر حماية كلمة المرور
           secedit /export /cfg C:\secpol.cfg
           (Get-Content C:\secpol.cfg) -replace "PasswordComplexity = 1", "PasswordComplexity = 0" | Set-Content C:\secpol.cfg
           secedit /configure /db C:\windows\security\local.sdb /cfg C:\secpol.cfg /areas SECURITYPOLICY
           Remove-Item -Force C:\secpol.cfg
           
-          # 6. إنشاء المستخدم
           $user = "yuta"
           $pass = "Yuta@321"
           if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) { 
@@ -53,21 +44,35 @@ jobs:
           }
           Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
-          
           Start-Service TermService -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 10
 
-      - name: Test RDP Port (Windows)
+      - name: Setup ngrok (Windows)
         if: inputs.os_version != 'linux'
         shell: powershell
         run: |
-          $maxAttempts = 5
-          for ($i=1; $i -le $maxAttempts; $i++) {
-              $test = Test-NetConnection -ComputerName "127.0.0.1" -Port 3389 -WarningAction SilentlyContinue
-              if ($test.TcpTestSucceeded) { exit 0 }
-              Start-Sleep -Seconds 5
+          Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "ngrok.zip"
+          Expand-Archive -Path "ngrok.zip" -DestinationPath "." -Force
+          
+          $tokens = @("${{ secrets.NGROK_TOKEN_1 }}", "${{ secrets.NGROK_TOKEN_2 }}", "${{ secrets.NGROK_TOKEN_3 }}", "${{ secrets.NGROK_TOKEN_4 }}", "${{ secrets.NGROK_TOKEN_5 }}", "${{ secrets.NGROK_TOKEN_6 }}", "${{ secrets.NGROK_TOKEN_7 }}")
+          $tunnel = ""
+          foreach ($t in $tokens) {
+            if ([string]::IsNullOrWhiteSpace($t)) { continue }
+            .\ngrok.exe config add-authtoken $t
+            Start-Process -FilePath ".\ngrok.exe" -ArgumentList "tcp 3389 --log=stdout" -NoNewWindow -RedirectStandardOutput "ngrok.log"
+            Start-Sleep -Seconds 10
+            try {
+              $info = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels"
+              if ($info.tunnels) {
+                $tunnel = $info.tunnels[0].public_url -replace "tcp://", ""
+                break
+              }
+            } catch { }
+            Stop-Process -Name "ngrok" -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
           }
-          exit 1
+          if ([string]::IsNullOrWhiteSpace($tunnel)) { exit 1 }
+          echo "TUNNEL_URL=$tunnel" >> $env:GITHUB_ENV
 
       - name: Configure Environment (Linux)
         if: inputs.os_version == 'linux'
@@ -85,27 +90,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ngrok
 
-      - name: Setup ngrok and Get URL
+      - name: Setup ngrok (Linux)
+        if: inputs.os_version == 'linux'
         shell: bash
         run: |
-          if [ "${{ inputs.os_version }}" != "linux" ]; then
-            curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -o ngrok.zip
-            unzip -o ngrok.zip -d ngrok
-            NGROK_BIN="./ngrok/ngrok.exe"
-            PORT=3389
-          else
-            NGROK_BIN="ngrok"
-            PORT=5901
-          fi
-          
           tokens=("${{ secrets.NGROK_TOKEN_1 }}" "${{ secrets.NGROK_TOKEN_2 }}" "${{ secrets.NGROK_TOKEN_3 }}" "${{ secrets.NGROK_TOKEN_4 }}" "${{ secrets.NGROK_TOKEN_5 }}" "${{ secrets.NGROK_TOKEN_6 }}" "${{ secrets.NGROK_TOKEN_7 }}")
           TUNNEL=""
           for t in "${tokens[@]}"; do
             if [ -z "$t" ]; then continue; fi
-            $NGROK_BIN config add-authtoken $t
-            $NGROK_BIN tcp $PORT --log=stdout > ngrok.log 2>&1 &
+            ngrok config add-authtoken $t
+            ngrok tcp 5901 --log=stdout > ngrok.log 2>&1 &
             NGROK_PID=$!
-            sleep 8
+            sleep 10
             TUNNEL_INFO=$(curl -s http://127.0.0.1:4040/api/tunnels)
             TUNNEL=$(echo $TUNNEL_INFO | jq -r '.tunnels[0].public_url // empty')
             if [ -n "$TUNNEL" ] && [ "$TUNNEL" != "null" ]; then
@@ -114,7 +110,7 @@ jobs:
               break
             else
               kill $NGROK_PID
-              sleep 1
+              sleep 2
             fi
           done
           if [ -z "$TUNNEL" ]; then exit 1; fi

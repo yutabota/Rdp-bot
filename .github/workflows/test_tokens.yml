@@ -1,0 +1,48 @@
+name: Test Ngrok Tokens
+on:
+  workflow_dispatch:
+
+jobs:
+  test_tokens:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download ngrok
+        run: |
+          wget -q https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
+          tar -xzf ngrok-v3-stable-linux-amd64.tgz
+          chmod +x ngrok
+      
+      - name: Test Tokens
+        run: |
+          TOKENS=(
+            "3LVg7kzG0ZnbZ577YdVxcFAUDhY_5uMkowqVV9hRLyftvb1Ek"
+            "3LVfxdQ2rQYNgGg0XD6IO1B0n24_6aNQNed5t8P7R4hZC3mmy"
+            "3LVfmrOLQcfdUZogKOua57xjF1Q_7iKiuBSGwFA5xoRDVHsNb"
+            "3LVfYho7RQGPncb8D0V30RheoRO_3a4yLxDtiT6QGyixEpWM7"
+            "3KuLWsHX4AcugJNFAgmWjRw8JyM_32Xe9B9U6yMh1gchr8y3v"
+            "3BGgCND7qe3G9Zg8Tfa02lkifYI_6gY4Xc4xAUkaaC6SX5cfH"
+            "3LVeGnkLD9QW4vFUWkbkUsuY0r2_5wH6QJAx2jDp6QY2wYxcR"
+          )
+          for i in "${!TOKENS[@]}"; do
+            token="${TOKENS[$i]}"
+            echo "=================================================="
+            echo "Testing Token #$((i+1)): ${token:0:10}..."
+            ./ngrok config add-authtoken "$token"
+            ./ngrok tcp 8080 --log=stdout > ngrok_test.log 2>&1 &
+            PID=$!
+            sleep 6
+            if grep -q "Forwarding" ngrok_test.log; then
+              echo "✅ STATUS: SUCCESS (Token is Working)"
+            elif grep -q "ERR_NGROK_107" ngrok_test.log; then
+              echo "❌ STATUS: FAILED (Invalid or Revoked Token)"
+            elif grep -q "ERR_NGROK_160" ngrok_test.log; then
+              echo "❌ STATUS: FAILED (Limit Reached for Free Account)"
+            elif grep -q "ERR_NGROK_105" ngrok_test.log; then
+              echo "❌ STATUS: FAILED (Token Format Error)"
+            else
+              echo "❌ STATUS: FAILED (Unknown Error)"
+              tail -n 2 ngrok_test.log
+            fi
+            kill -9 $PID || true
+            sleep 2
+          done
